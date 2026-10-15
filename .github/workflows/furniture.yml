@@ -1,0 +1,30 @@
+name: Обновить каталог мебели
+on:
+  workflow_dispatch:
+    inputs:
+      max:
+        description: 'Сколько моделей взять (по популярности)'
+        required: false
+        default: '400'
+permissions:
+  contents: write
+jobs:
+  furniture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm i --no-audit --no-fund && npm i --no-save --no-audit --no-fund @gltf-transform/cli@4
+      - name: Каталог Poly Haven (CC0)
+        env:
+          MAX: ${{ github.event.inputs.max }}
+        run: node scripts/furniture.mjs --max "$(echo "${MAX:-400}" | tr -cd '0-9')"
+      - name: Сохранить
+        run: |
+          git config user.name "denkirs-3d-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add f
+          git diff --cached --quiet || git commit -m "Каталог мебели: обновление $(date +%F)"
+          git push
