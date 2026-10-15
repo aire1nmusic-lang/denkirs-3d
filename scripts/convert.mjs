@@ -76,6 +76,31 @@ export function parseObj(txt) {
   return { pos: new Float32Array(P), idx: new Uint32Array(I) };
 }
 
+// Чистка: в архивах бывает кусок трека и несколько вариантов светильника рядом.
+// Делим на связные части, собираем соседние части в группы, берём группу ближе всего к началу координат,
+// из неё убираем длинные тонкие детали сверху (трек), если кроме них что-то остаётся.
+export function clean(m) {
+  const nV = m.pos.length / 3, par = new Int32Array(nV).map((_, i) => i);
+  const f = x => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+  for (let i = 0; i < m.idx.length; i += 3) { const a = f(m.idx[i]), b = f(m.idx[i + 1]), c = f(m.idx[i + 2]); par[b] = a; par[f(c)] = a; }
+  const comp = new Map();
+  for (let i = 0; i < m.idx.length; i += 3) { const r = f(m.idx[i]); let c = comp.get(r); if (!c) { c = { mn: [1e9, 1e9, 1e9], mx: [-1e9, -1e9, -1e9], t: [] }; comp.set(r, c); } c.t.push(i); for (let k = 0; k < 3; k++) { const v = m.idx[i + k]; for (let a = 0; a < 3; a++) { const x = m.pos[v * 3 + a]; if (x < c.mn[a]) c.mn[a] = x; if (x > c.mx[a]) c.mx[a] = x; } } }
+  const C = [...comp.values()]; if (C.length < 2) return { m, note: '' };
+  const near = (a, b, g) => a.mn[0] - g <= b.mx[0] && b.mn[0] - g <= a.mx[0] && a.mn[1] - g <= b.mx[1] && b.mn[1] - g <= a.mx[1] && a.mn[2] - g <= b.mx[2] && b.mn[2] - g <= a.mx[2];
+  const gp = C.map((_, i) => i), gf = x => { while (gp[x] !== x) x = gp[x] = gp[gp[x]]; return x; };
+  for (let i = 0; i < C.length; i++) for (let j = i + 1; j < C.length; j++) if (near(C[i], C[j], 5)) gp[gf(j)] = gf(i);
+  const G = new Map(); C.forEach((c, i) => { const r = gf(i); let g = G.get(r); if (!g) { g = { c: [], mn: [1e9, 1e9, 1e9], mx: [-1e9, -1e9, -1e9] }; G.set(r, g); } g.c.push(c); for (let a = 0; a < 3; a++) { g.mn[a] = Math.min(g.mn[a], c.mn[a]); g.mx[a] = Math.max(g.mx[a], c.mx[a]); } });
+  const groups = [...G.values()]; let best = groups[0], bd = 1e18;
+  for (const g of groups) { const cx = (g.mn[0] + g.mx[0]) / 2, cz = (g.mn[2] + g.mx[2]) / 2, d = cx * cx + cz * cz; if (d < bd) { bd = d; best = g; } }
+  let keep = best.c, note = groups.length > 1 ? 'вариантов ' + groups.length + ', взят ближний к центру' : '';
+  const top = best.mx[1], isTrack = c => (c.mx[0] - c.mn[0]) >= 200 && (c.mx[1] - c.mn[1]) <= 45 && (c.mx[2] - c.mn[2]) <= 45 && c.mx[1] >= top - 2;
+  const rest = keep.filter(c => !isTrack(c)), tr = keep.length - rest.length;
+  const trL = Math.max(0, ...keep.filter(isTrack).map(c => c.mx[0] - c.mn[0])), rX = rest.length ? Math.max(...rest.map(c => c.mx[0])) - Math.min(...rest.map(c => c.mn[0])) : 0;
+  if (tr && rest.length && rest.reduce((a, c) => a + c.t.length, 0) > 60 && rX < trL * 0.7) { keep = rest; note += (note ? '; ' : '') + 'убран трек'; }
+  const I = []; keep.forEach(c => c.t.forEach(i => I.push(m.idx[i], m.idx[i + 1], m.idx[i + 2])));
+  return { m: { pos: m.pos, idx: new Uint32Array(I) }, note };
+}
+
 export function simplify(m, target = TARGET) {
   let I = m.idx;
   if (I.length / 3 > target) {
@@ -113,16 +138,16 @@ async function main() {
   for (const b of bases) {
     const arc = pickArchive(b, names);
     if (!arc) { miss++; continue; }
-    if (!force && index[b] && index[b].src === arc && fs.existsSync(path.join(OUT, b + '.dkm'))) { ok++; continue; }
+    if (!force && index[b] && index[b].src === arc && index[b].v === 2 && fs.existsSync(path.join(OUT, b + '.dkm'))) { ok++; continue; }
     try {
       const buf = await get(SRC + encodeURIComponent(arc)); if (!buf) { miss++; continue; }
       const obj = await objFrom(buf, arc); if (!obj) { console.log('нет OBJ в', arc); fail++; continue; }
-      const m0 = parseObj(obj), m = simplify(m0), e = encode(m);
+      const m0 = parseObj(obj), cl = clean(m0), m = simplify(cl.m), e = encode(m);
       fs.writeFileSync(path.join(OUT, b + '.dkm'), e.buf);
-      index[b] = { src: arc, tris: e.tris, bb: e.bb, kb: Math.round(e.buf.length / 1024) };
-      ok++; console.log(b, arc, (m0.idx.length / 3) + ' → ' + e.tris + ' треуг.,', index[b].kb + ' КБ', JSON.stringify(e.bb));
+      index[b] = { src: arc, tris: e.tris, bb: e.bb, kb: Math.round(e.buf.length / 1024), v: 2 }; if (cl.note) index[b].note = cl.note;
+      ok++; console.log(b, arc, (m0.idx.length / 3) + ' → ' + e.tris + ' треуг.,', cl.note || '', index[b].kb + ' КБ', JSON.stringify(e.bb));
       fs.writeFileSync(idxPath, JSON.stringify(index, null, 0));
-    } catch (er) { fail++; console.log('ошибка', b, arc, er.message); }
+    } catch (er) { fail++; console.log('ошибка', b, arc, (er && er.message) || String(er)); }
   }
   fs.writeFileSync(idxPath, JSON.stringify(index, null, 0));
   console.log(`модели: ${ok} есть, ${miss} без архива, ${fail} ошибок`);
