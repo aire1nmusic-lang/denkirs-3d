@@ -1,0 +1,41 @@
+name: Обновить 3D-модели
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Только эти артикулы через запятую (пусто — все из lamps.txt)'
+        required: false
+        default: ''
+      force:
+        description: 'Пересобрать уже готовые (true/false)'
+        required: false
+        default: 'false'
+  schedule:
+    - cron: '17 3 1 * *'   # раз в месяц: подтянуть новые модели и IES с docs.denkirs.ru
+permissions:
+  contents: write
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci || npm i
+      - name: Конвертация
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          ARGS="lamps.txt"
+          if [ -n "$ONLY" ]; then ARGS="$ARGS --only $(echo "$ONLY" | tr -cd 'A-Z0-9,-')"; fi
+          if [ "$FORCE" = "true" ]; then ARGS="$ARGS --force"; fi
+          node scripts/convert.mjs $ARGS
+      - name: Сохранить модели
+        run: |
+          git config user.name "denkirs-3d-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add m ies
+          git diff --cached --quiet || git commit -m "3D-модели и IES: обновление $(date +%F)"
+          git push
