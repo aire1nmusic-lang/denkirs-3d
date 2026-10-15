@@ -1,0 +1,4 @@
+{ "name": "denkirs-3d", "private": true, "type": "module", "version": "1.0.0",
+  "description": "Упрощённые 3D-модели DENKIRS для конфигуратора треков",
+  "scripts": { "convert": "node scripts/convert.mjs lamps.txt" },
+  "dependencies": { "fflate": "0.8.2", "meshoptimizer": "0.21.0", "node-unrar-js": "2.0.2" } }
