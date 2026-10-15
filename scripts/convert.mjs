@@ -10,6 +10,8 @@ import path from 'node:path';
 import { createExtractorFromData } from 'node-unrar-js';
 import { unzipSync } from 'fflate';
 import { MeshoptSimplifier } from 'meshoptimizer';
+import { execFileSync } from 'node:child_process';
+import os from 'node:os';
 
 const SRC = 'https://docs.denkirs.ru/3d/Denkirs/';
 const SRC_IES = 'https://docs.denkirs.ru/ies/Denkirs/';
@@ -38,15 +40,15 @@ function pickArchive(base, names) {
 }
 
 let WASM = null;
-async function fileFrom(buf, name, re) {
+async function fileFrom(buf, name, re, withName) {
   if (/\.rar$/i.test(name)) {
     if (!WASM) WASM = fs.readFileSync(path.join(path.dirname(new URL(import.meta.resolve('node-unrar-js')).pathname), 'js', 'unrar.wasm'));
     const ex = await createExtractorFromData({ wasmBinary: WASM, data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) });
     const out = ex.extract({ files: h => re.test(h.name) });
     const fsx = [...out.files].filter(f => f.extraction).sort((a, b) => a.fileHeader.name.length - b.fileHeader.name.length);
-    return fsx[0] ? Buffer.from(fsx[0].extraction) : null;
+    return fsx[0] ? (withName ? { buf: Buffer.from(fsx[0].extraction), name: fsx[0].fileHeader.name } : Buffer.from(fsx[0].extraction)) : null;
   }
-  if (/\.zip$/i.test(name)) { const z = unzipSync(new Uint8Array(buf), { filter: f => re.test(f.name) }); const k = Object.keys(z).sort((a, b) => a.length - b.length)[0]; return k ? Buffer.from(z[k]) : null; }
+  if (/\.zip$/i.test(name)) { const z = unzipSync(new Uint8Array(buf), { filter: f => re.test(f.name) }); const k = Object.keys(z).sort((a, b) => a.length - b.length)[0]; return k ? (withName ? { buf: Buffer.from(z[k]), name: k } : Buffer.from(z[k])) : null; }
   return re.test(name) ? buf : null;
 }
 async function objFrom(buf, name) {
@@ -141,10 +143,16 @@ async function main() {
     if (!force && index[b] && index[b].src === arc && index[b].v === 2 && fs.existsSync(path.join(OUT, b + '.dkm'))) { ok++; continue; }
     try {
       const buf = await get(SRC + encodeURIComponent(arc)); if (!buf) { miss++; continue; }
-      const obj = await objFrom(buf, arc); if (!obj) { console.log('нет OBJ в', arc); fail++; continue; }
+      let obj = await objFrom(buf, arc), via = '';
+      if (!obj) { /* в архиве нет OBJ — берём FBX/3DS/DAE и переводим в OBJ через assimp */
+        const got = await fileFrom(buf, arc, /\.(fbx|3ds|dae)$/i, true);
+        if (got) { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dk-')), ext = got.name.split('.').pop().toLowerCase(), fin = path.join(dir, 'm.' + ext), fout = path.join(dir, 'm.obj');
+          fs.writeFileSync(fin, got.buf); try { execFileSync('assimp', ['export', fin, fout], { stdio: 'pipe', timeout: 120000 }); obj = fs.readFileSync(fout, 'utf8'); via = 'assimp ' + ext; } catch (er) { console.log('assimp не смог', arc, String(er.stderr || er.message).slice(0, 200)); } fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+      if (!obj) { console.log('нет OBJ/FBX в', arc); fail++; continue; }
       const m0 = parseObj(obj), cl = clean(m0), m = simplify(cl.m), e = encode(m);
       fs.writeFileSync(path.join(OUT, b + '.dkm'), e.buf);
-      index[b] = { src: arc, tris: e.tris, bb: e.bb, kb: Math.round(e.buf.length / 1024), v: 2 }; if (cl.note) index[b].note = cl.note;
+      index[b] = { src: arc, tris: e.tris, bb: e.bb, kb: Math.round(e.buf.length / 1024), v: 2 }; if (cl.note) index[b].note = cl.note; if (via) index[b].via = via;
       ok++; console.log(b, arc, (m0.idx.length / 3) + ' → ' + e.tris + ' треуг.,', cl.note || '', index[b].kb + ' КБ', JSON.stringify(e.bb));
       fs.writeFileSync(idxPath, JSON.stringify(index, null, 0));
     } catch (er) { fail++; console.log('ошибка', b, arc, (er && er.message) || String(er)); }
